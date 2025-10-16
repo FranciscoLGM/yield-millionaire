@@ -27,31 +27,37 @@ contract APYExtra is ReentrancyGuard, AccessControl {
 
     // ============ STRUCTS ============
     struct UserInfo {
-        uint256 expirationTime;     // Tiempo expiración APY extra (0 = no aplica)
-        uint256 lastUpdateTime;     // Timestamp último depósito/actualización
-        uint256 extraAPY;           // APY extra asignado al usuario
-        uint256 balance;            // Balance del usuario
+        uint256 expirationTime; // Tiempo expiración APY extra (0 = no aplica)
+        uint256 lastUpdateTime; // Timestamp último depósito/actualización
+        uint256 extraAPY; // APY extra asignado al usuario
+        uint256 balance; // Balance del usuario
         uint256 accumulatedEarnings; // Ganancia acumulada previamente
-        address referrer;           // Referente del usuario
+        address referrer; // Referente del usuario
     }
 
     struct ReferralInfo {
-        uint256 lastUpdateTime;     // Timestamp último cálculo de ganancias
+        uint256 lastUpdateTime; // Timestamp último cálculo de ganancias
         uint256 accumulatedEarnings; // Ganancia acumulada de referidos
-        address[] referrals;        // Lista de referidos
+        address[] referrals; // Lista de referidos
     }
 
     // ============ STATE VARIABLES ============
     IERC20 public immutable token;
-    
+
     mapping(address => UserInfo) public userInfo;
     mapping(address => ReferralInfo) public referralInfo;
-    
+
     uint256 public referralAPY;
     bool public apyEnabled;
 
     // ============ EVENTS ============
-    event Deposited(address indexed user, uint256 amount, uint256 extraAPY, uint256 expirationTime, address indexed referrer);
+    event Deposited(
+        address indexed user,
+        uint256 amount,
+        uint256 extraAPY,
+        uint256 expirationTime,
+        address indexed referrer
+    );
     event Withdrawn(address indexed user, uint256 amount);
     event EarningsClaimed(address indexed user, uint256 amount);
     event APYToggled(bool enabled);
@@ -72,11 +78,11 @@ contract APYExtra is ReentrancyGuard, AccessControl {
     // ============ CONSTRUCTOR ============
     constructor(address admin, uint256 _referralAPY, IERC20 _token) {
         token = _token;
-        
+
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(REBALANCER_ROLE, admin);
         _grantRole(APY_MANAGER_ROLE, admin);
-        
+
         referralAPY = _referralAPY;
         apyEnabled = true;
     }
@@ -96,7 +102,13 @@ contract APYExtra is ReentrancyGuard, AccessControl {
         uint256 expirationTime,
         uint256 extraAPY,
         uint256 amount
-    ) external nonReentrant validAddress(user) validAmount(amount) onlyRole(REBALANCER_ROLE) {
+    )
+        external
+        nonReentrant
+        validAddress(user)
+        validAmount(amount)
+        onlyRole(REBALANCER_ROLE)
+    {
         _deposit(user, expirationTime, extraAPY, amount, address(0));
     }
 
@@ -115,7 +127,13 @@ contract APYExtra is ReentrancyGuard, AccessControl {
         uint256 extraAPY,
         uint256 amount,
         address referrer
-    ) external nonReentrant validAddress(user) validAmount(amount) onlyRole(REBALANCER_ROLE) {
+    )
+        external
+        nonReentrant
+        validAddress(user)
+        validAmount(amount)
+        onlyRole(REBALANCER_ROLE)
+    {
         _deposit(user, expirationTime, extraAPY, amount, referrer);
     }
 
@@ -123,7 +141,7 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @dev Función interna que implementa la lógica de depósito según especificación
      * Flujo exacto del documento:
      * 1. Acumula ganancias existentes
-     * 2. Actualiza timestamp lastUpdateTime al actual  
+     * 2. Actualiza timestamp lastUpdateTime al actual
      * 3. Incrementa balance
      * 4. Actualiza expirationTime y extraAPY solo si nuevo APY es mayor
      * 5. Si hay referrer, registra y actualiza ganancias de referidos
@@ -136,10 +154,11 @@ contract APYExtra is ReentrancyGuard, AccessControl {
         address referrer
     ) internal {
         // Transferir tokens primero (operación crítica)
-        if (!token.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        if (!token.transferFrom(msg.sender, address(this), amount))
+            revert TransferFailed();
 
         UserInfo storage userData = userInfo[user];
-        
+
         // 1. Acumular las ganancias existentes (Paso 1 del documento)
         uint256 pendingEarnings = getPendingEarnings(user);
         if (pendingEarnings > 0) {
@@ -164,12 +183,12 @@ contract APYExtra is ReentrancyGuard, AccessControl {
             if (_isValidReferrer(user, referrer)) {
                 userData.referrer = referrer;
                 referralInfo[referrer].referrals.push(user);
-                
+
                 // Inicializar timestamp del referente si es primera vez
                 if (referralInfo[referrer].lastUpdateTime == 0) {
                     referralInfo[referrer].lastUpdateTime = block.timestamp;
                 }
-                
+
                 emit ReferrerAssigned(user, referrer);
             }
         }
@@ -180,7 +199,13 @@ contract APYExtra is ReentrancyGuard, AccessControl {
             _updateReferralEarnings(userData.referrer);
         }
 
-        emit Deposited(user, amount, extraAPY, expirationTime, userData.referrer);
+        emit Deposited(
+            user,
+            amount,
+            extraAPY,
+            expirationTime,
+            userData.referrer
+        );
     }
 
     // ============ WITHDRAW & CLAIM FUNCTIONS ============
@@ -190,20 +215,22 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @dev Sigue especificación: primero acumular ganancias antes de retirar
      * @param amount Cantidad a retirar
      */
-    function withdraw(uint256 amount) external nonReentrant validAmount(amount) {
+    function withdraw(
+        uint256 amount
+    ) external nonReentrant validAmount(amount) {
         address user = msg.sender;
         UserInfo storage userData = userInfo[user];
-        
+
         // Acumular ganancias pendientes para el usuario (como deposit)
         uint256 pendingEarnings = getPendingEarnings(user);
         if (pendingEarnings > 0) {
             userData.accumulatedEarnings += pendingEarnings;
             userData.lastUpdateTime = block.timestamp;
         }
-        
+
         if (userData.balance < amount) revert InsufficientBalance();
         userData.balance -= amount;
-        
+
         if (!token.transfer(user, amount)) revert TransferFailed();
         emit Withdrawn(user, amount);
 
@@ -221,14 +248,14 @@ contract APYExtra is ReentrancyGuard, AccessControl {
     function claimEarnings() external nonReentrant {
         address user = msg.sender;
         UserInfo storage userData = userInfo[user];
-        
+
         // Acumular ganancias pendientes
         uint256 pendingEarnings = getPendingEarnings(user);
         if (pendingEarnings > 0) {
             userData.accumulatedEarnings += pendingEarnings;
             userData.lastUpdateTime = block.timestamp;
         }
-        
+
         uint256 totalEarnings = userData.accumulatedEarnings;
         if (totalEarnings > 0) {
             userData.accumulatedEarnings = 0;
@@ -251,9 +278,11 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param user Address del usuario
      * @return pendingEarnings Ganancia generada desde última actualización
      */
-    function getPendingEarnings(address user) public view returns (uint256 pendingEarnings) {
+    function getPendingEarnings(
+        address user
+    ) public view returns (uint256 pendingEarnings) {
         UserInfo storage userData = userInfo[user];
-        
+
         // No revertir - devolver 0 si condiciones no favorables (corrección del documento)
         if (!apyEnabled || userData.extraAPY == 0 || userData.balance == 0) {
             return 0;
@@ -261,10 +290,13 @@ contract APYExtra is ReentrancyGuard, AccessControl {
 
         // Determinar calculationTime según especificación del documento
         uint256 calculationTime = block.timestamp;
-        if (userData.expirationTime != 0 && block.timestamp > userData.expirationTime) {
+        if (
+            userData.expirationTime != 0 &&
+            block.timestamp > userData.expirationTime
+        ) {
             calculationTime = userData.expirationTime; // Usar tiempo expiración si ya expiró
         }
-        
+
         // Garantizar que no sea negativo (especificación del documento)
         if (calculationTime < userData.lastUpdateTime) {
             calculationTime = userData.lastUpdateTime;
@@ -274,7 +306,9 @@ contract APYExtra is ReentrancyGuard, AccessControl {
         if (timeDelta == 0) return 0;
 
         // Fórmula optimizada: (balance * extraAPY * timeDelta) / (APY_SCALE * 365 days)
-        return (userData.balance * userData.extraAPY * timeDelta) / (APY_SCALE * YEAR);
+        return
+            (userData.balance * userData.extraAPY * timeDelta) /
+            (APY_SCALE * YEAR);
     }
 
     /**
@@ -282,7 +316,9 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param user Address del usuario
      * @return totalEarnings Ganancia total (pendiente + acumulada)
      */
-    function getTotalEarnings(address user) public view returns (uint256 totalEarnings) {
+    function getTotalEarnings(
+        address user
+    ) public view returns (uint256 totalEarnings) {
         return getPendingEarnings(user) + userInfo[user].accumulatedEarnings;
     }
 
@@ -291,14 +327,16 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param referrer Address del referente
      * @return totalBalance Balance total de todos los referidos
      */
-    function getReferralsBalance(address referrer) public view returns (uint256 totalBalance) {
+    function getReferralsBalance(
+        address referrer
+    ) public view returns (uint256 totalBalance) {
         address[] storage referrals = referralInfo[referrer].referrals;
         totalBalance = 0;
-        
+
         for (uint i = 0; i < referrals.length; i++) {
             totalBalance += userInfo[referrals[i]].balance;
         }
-        
+
         return totalBalance;
     }
 
@@ -308,9 +346,11 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param referrer Address del referente
      * @return referralEarnings Ganancias generadas por referidos
      */
-    function getReferralsEarnings(address referrer) public view returns (uint256 referralEarnings) {
+    function getReferralsEarnings(
+        address referrer
+    ) public view returns (uint256 referralEarnings) {
         ReferralInfo storage refData = referralInfo[referrer];
-        
+
         // No revertir - devolver 0 si condiciones no favorables
         if (!apyEnabled || referralAPY == 0) return 0;
 
@@ -339,7 +379,9 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param referrer Address del referente
      * @return referrals Lista de addresses de referidos
      */
-    function getReferrals(address referrer) public view returns (address[] memory referrals) {
+    function getReferrals(
+        address referrer
+    ) public view returns (address[] memory referrals) {
         return referralInfo[referrer].referrals;
     }
 
@@ -354,15 +396,21 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @return referrer Address del referente
      * @return referralCount Número de referidos del usuario
      */
-    function getUserInfo(address user) external view returns (
-        uint256 balance,
-        uint256 pendingEarnings,
-        uint256 accumulatedEarnings,
-        uint256 extraAPY,
-        uint256 expirationTime,
-        address referrer,
-        uint256 referralCount
-    ) {
+    function getUserInfo(
+        address user
+    )
+        external
+        view
+        returns (
+            uint256 balance,
+            uint256 pendingEarnings,
+            uint256 accumulatedEarnings,
+            uint256 extraAPY,
+            uint256 expirationTime,
+            address referrer,
+            uint256 referralCount
+        )
+    {
         UserInfo storage userData = userInfo[user];
         balance = userData.balance;
         pendingEarnings = getPendingEarnings(user);
@@ -388,7 +436,9 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @notice Actualiza APY de referidos
      * @param newReferralAPY Nuevo valor de APY para referidos
      */
-    function updateReferralAPY(uint256 newReferralAPY) external onlyRole(APY_MANAGER_ROLE) {
+    function updateReferralAPY(
+        uint256 newReferralAPY
+    ) external onlyRole(APY_MANAGER_ROLE) {
         referralAPY = newReferralAPY;
         emit ReferralAPYUpdated(newReferralAPY);
     }
@@ -413,7 +463,10 @@ contract APYExtra is ReentrancyGuard, AccessControl {
      * @param referrer Address del referente propuesto
      * @return isValid true si el referente es válido
      */
-    function _isValidReferrer(address user, address referrer) internal view returns (bool isValid) {
+    function _isValidReferrer(
+        address user,
+        address referrer
+    ) internal view returns (bool isValid) {
         if (referrer == address(0) || referrer == user) return false;
 
         // Prevenir ciclos en el árbol de referidos
