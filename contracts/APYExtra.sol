@@ -6,17 +6,18 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title APYExtra - Minimal Staking Contract with Extra APY and Referrals
- * @dev Optimized version following APY_EXTRA.pdf specification with gas efficiency
+ * @title APYExtra
+ * @notice Yield contract with extra APY and referral system
+ * @dev Uses roles and secure validations to manage deposits and earnings
  */
 contract APYExtra is ReentrancyGuard, AccessControl {
     // ============ CONSTANTS ============
-    uint256 public constant APY_SCALE = 10_000;
-    uint256 public constant YEAR = 365 days;
+    uint256 public constant APY_SCALE = 10_000; // Escala de precisión para representar porcentajes en base 10000 (por ejemplo, 10000 = 100%, 500 = 5%).
+    uint256 public constant YEAR = 365 days; // Time reference for calculating annual interest
 
     // ============ ROLES ============
-    bytes32 public constant REBALANCER_ROLE = keccak256("REBALANCER_ROLE");
-    bytes32 public constant APY_MANAGER_ROLE = keccak256("APY_MANAGER_ROLE");
+    bytes32 public constant REBALANCER_ROLE = keccak256("REBALANCER_ROLE"); // Puede ejecutar depósitos y retiros (Backend)
+    bytes32 public constant APY_MANAGER_ROLE = keccak256("APY_MANAGER_ROLE"); // puede actualizar el APY global de referidos o habilitar/deshabilitar el cálculo de APY.
 
     // ============ CUSTOM ERRORS ============
     error ZeroAddress();
@@ -27,28 +28,28 @@ contract APYExtra is ReentrancyGuard, AccessControl {
 
     // ============ STRUCTS ============
     struct UserInfo {
-        uint256 expirationTime; // Tiempo expiración APY extra (0 = no aplica)
-        uint256 lastUpdateTime; // Timestamp último depósito/actualización
+        uint256 expirationTime; // Tiempo expiración APY extra (0 si no aplica)
+        uint256 lastUpdateTime; // Timestamp último depósito o actualización de su saldo o ganancias
         uint256 extraAPY; // APY extra asignado al usuario
         uint256 balance; // Balance del usuario
         uint256 accumulatedEarnings; // Ganancia acumulada previamente
-        address referrer; // Referente del usuario
+        address referrer; // Dirección del usuario que lo refirió 
     }
 
     struct ReferralInfo {
-        uint256 lastUpdateTime; // Timestamp último cálculo de ganancias
-        uint256 accumulatedEarnings; // Ganancia acumulada de referidos
-        address[] referrals; // Lista de referidos
+        uint256 lastUpdateTime; // Timestamp último cálculo de ganancias por referidos
+        uint256 accumulatedEarnings; // Ganancia acumulada por los depositos de referidos
+        address[] referrals; // Lista de referidos 
     }
 
     // ============ STATE VARIABLES ============
-    IERC20 public immutable token;
+    IERC20 public immutable token; // Token ERC20 aceptado para depósito (USDC)
 
-    mapping(address => UserInfo) public userInfo;
-    mapping(address => ReferralInfo) public referralInfo;
+    mapping(address => UserInfo) public userInfo; // Registro principal de cada usuario
+    mapping(address => ReferralInfo) public referralInfo; // Registro de información de referidos por cada referente
 
-    uint256 public referralAPY;
-    bool public apyEnabled;
+    uint256 public referralAPY; // APY global que define el rendimiento generado por los referidos
+    bool public apyEnabled; // Bandera global para pausar o reanudar la acumulación de APY.
 
     // ============ EVENTS ============
     event Deposited(
@@ -159,25 +160,25 @@ contract APYExtra is ReentrancyGuard, AccessControl {
 
         UserInfo storage userData = userInfo[user];
 
-        // 1. Acumular las ganancias existentes (Paso 1 del documento)
+        // 1. Acumular las ganancias existentes 
         uint256 pendingEarnings = getPendingEarnings(user);
         if (pendingEarnings > 0) {
             userData.accumulatedEarnings += pendingEarnings;
         }
 
-        // 2. Actualizar el timestamp lastUpdateTime al actual (Paso 2 del documento)
+        // 2. Actualizar el timestamp lastUpdateTime al actual 
         userData.lastUpdateTime = block.timestamp;
 
-        // 3. Incrementar balance con el nuevo depósito (Paso 3 del documento)
+        // 3. Incrementar balance con el nuevo depósito 
         userData.balance += amount;
 
-        // 4. Actualizar expirationTime y extraAPY solo si el nuevo APY es mayor que el existente (Paso 4 del documento)
+        // 4. Actualizar expirationTime y extraAPY solo si el nuevo APY es mayor que el existente 
         if (extraAPY > userData.extraAPY) {
             userData.extraAPY = extraAPY;
             userData.expirationTime = expirationTime;
         }
 
-        // 5. Si se indica un referrer, se registra en la estructura (Paso 5 del documento)
+        // 5. Si se indica un referrer, se registra en la estructura 
         if (referrer != address(0) && userData.referrer == address(0)) {
             // Validar que el referente sea válido (no ciclos)
             if (_isValidReferrer(user, referrer)) {
@@ -283,7 +284,7 @@ contract APYExtra is ReentrancyGuard, AccessControl {
     ) public view returns (uint256 pendingEarnings) {
         UserInfo storage userData = userInfo[user];
 
-        // No revertir - devolver 0 si condiciones no favorables (corrección del documento)
+        // No revertir - devolver 0 si condiciones no favorables 
         if (!apyEnabled || userData.extraAPY == 0 || userData.balance == 0) {
             return 0;
         }
@@ -332,6 +333,7 @@ contract APYExtra is ReentrancyGuard, AccessControl {
     ) public view returns (uint256 totalBalance) {
         address[] storage referrals = referralInfo[referrer].referrals;
         totalBalance = 0;
+        
 
         for (uint i = 0; i < referrals.length; i++) {
             totalBalance += userInfo[referrals[i]].balance;
