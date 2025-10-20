@@ -17,6 +17,8 @@ contract APYExtra is AccessControl {
     error InsufficientBalance();
     error InvalidAdmin();
     error CallerNotRebalancer();
+    error ConversionFailed();
+    error InvalidConverter();
 
     bytes32 public constant REBALANCER_ROLE = keccak256("REBALANCER_ROLE");
     bytes32 public constant APY_MANAGER_ROLE = keccak256("APY_MANAGER_ROLE");
@@ -63,7 +65,7 @@ contract APYExtra is AccessControl {
      * @notice Initialize contract with admin and referral APY
      * @param admin Admin address with all roles
      * @param initialReferralAPY Global referral APY (50 = 5%)
-     * @param converterAddress Address of token converter contract
+     * @param converterAddress Address of token converter contract (obligatorio)
      */
     constructor(
         address admin,
@@ -71,6 +73,7 @@ contract APYExtra is AccessControl {
         address converterAddress
     ) {
         if (admin == address(0)) revert InvalidAdmin();
+        if (converterAddress == address(0)) revert InvalidConverter();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(REBALANCER_ROLE, admin);
@@ -79,17 +82,18 @@ contract APYExtra is AccessControl {
         referralAPY = initialReferralAPY;
         apyEnabled = true;
 
-        if (converterAddress != address(0)) {
-            tokenConverter = MockTokenConverter(converterAddress);
-        }
+        tokenConverter = MockTokenConverter(converterAddress); // Siempre asignado
     }
 
     /**
      * @notice Set the token converter contract address
+     * @dev Only callable by admin. Useful for upgrades or emergency recovery.
+     * @param converterAddress New converter contract address
      */
     function setTokenConverter(
         address converterAddress
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (converterAddress == address(0)) revert InvalidConverter();
         tokenConverter = MockTokenConverter(converterAddress);
         emit ConverterUpdated(converterAddress);
     }
@@ -123,8 +127,8 @@ contract APYExtra is AccessControl {
 
     /**
      * @notice Withdraw funds after accumulating earnings
-     * @dev Accumulates earnings, converts tokens via external contract, updates balances
-     * @return convertedAmount Amount received after conversion (0 if conversion fails)
+     * @dev Converter is always required, will revert if conversion fails
+     * @return convertedAmount Amount received after conversion
      */
     function withdraw(uint256 amount) external returns (uint256) {
         if (amount == 0) return 0;
@@ -136,9 +140,17 @@ contract APYExtra is AccessControl {
 
         _accumulateUserAndReferrerEarnings(user);
 
-        uint256 convertedAmount = 0;
-        if (address(tokenConverter) != address(0)) {
-            convertedAmount = tokenConverter.convertAndBurn(amount, user);
+        // Converter siempre existe, pero manejamos posibles fallos
+        uint256 convertedAmount;
+        try tokenConverter.convertAndBurn(amount, user) returns (
+            uint256 result
+        ) {
+            convertedAmount = result;
+            if (result == 0) {
+                revert ConversionFailed();
+            }
+        } catch {
+            revert ConversionFailed();
         }
 
         userData.balance -= amount;
