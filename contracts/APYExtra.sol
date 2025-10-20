@@ -82,7 +82,7 @@ contract APYExtra is AccessControl {
         referralAPY = initialReferralAPY;
         apyEnabled = true;
 
-        tokenConverter = MockTokenConverter(converterAddress); // Siempre asignado
+        tokenConverter = MockTokenConverter(converterAddress);
     }
 
     /**
@@ -140,7 +140,6 @@ contract APYExtra is AccessControl {
 
         _accumulateUserAndReferrerEarnings(user);
 
-        // Converter siempre existe, pero manejamos posibles fallos
         uint256 convertedAmount;
         try tokenConverter.convertAndBurn(amount, user) returns (
             uint256 result
@@ -152,7 +151,6 @@ contract APYExtra is AccessControl {
         } catch {
             revert ConversionFailed();
         }
-
         userData.balance -= amount;
         userData.lastUpdateTime = block.timestamp;
 
