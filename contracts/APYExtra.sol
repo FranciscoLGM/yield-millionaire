@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "./mocks/MockTokenConverter.sol";
 
 /**
  * @title APYExtra
@@ -13,7 +14,6 @@ contract APYExtra is AccessControl {
     uint256 public constant YEAR = 365 days;
     uint256 public constant APY_DENOMINATOR = 1000;
 
-    error ZeroAmount();
     error InsufficientBalance();
     error InvalidAdmin();
     error CallerNotRebalancer();
@@ -42,6 +42,7 @@ contract APYExtra is AccessControl {
 
     uint256 public referralAPY;
     bool public apyEnabled;
+    MockTokenConverter public tokenConverter;
 
     event Deposited(
         address indexed user,
@@ -51,6 +52,7 @@ contract APYExtra is AccessControl {
     );
     event Withdrawn(address indexed user, uint256 amount);
     event ReferrerAssigned(address indexed user, address indexed referrer);
+    event ConverterUpdated(address indexed newConverter);
 
     modifier onlyRebalancer() {
         if (!hasRole(REBALANCER_ROLE, msg.sender)) revert CallerNotRebalancer();
@@ -61,8 +63,13 @@ contract APYExtra is AccessControl {
      * @notice Initialize contract with admin and referral APY
      * @param admin Admin address with all roles
      * @param initialReferralAPY Global referral APY (50 = 5%)
+     * @param converterAddress Address of token converter contract
      */
-    constructor(address admin, uint256 initialReferralAPY) {
+    constructor(
+        address admin,
+        uint256 initialReferralAPY,
+        address converterAddress
+    ) {
         if (admin == address(0)) revert InvalidAdmin();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -71,6 +78,20 @@ contract APYExtra is AccessControl {
 
         referralAPY = initialReferralAPY;
         apyEnabled = true;
+
+        if (converterAddress != address(0)) {
+            tokenConverter = MockTokenConverter(converterAddress);
+        }
+    }
+
+    /**
+     * @notice Set the token converter contract address
+     */
+    function setTokenConverter(
+        address converterAddress
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        tokenConverter = MockTokenConverter(converterAddress);
+        emit ConverterUpdated(converterAddress);
     }
 
     /**
@@ -102,22 +123,25 @@ contract APYExtra is AccessControl {
 
     /**
      * @notice Withdraw funds after accumulating earnings
-     * @dev Accumulates user earnings, referral earnings, and referrer's earnings
-     * @return amount Returns same amount for external handling
+     * @dev Accumulates earnings, converts tokens via external contract, updates balances
+     * @return convertedAmount Amount received after conversion (0 if conversion fails)
      */
     function withdraw(uint256 amount) external returns (uint256) {
-        if (amount == 0) revert ZeroAmount();
+        if (amount == 0) return 0;
 
         address user = msg.sender;
         UserInfo storage userData = userInfo[user];
 
         if (userData.balance < amount) revert InsufficientBalance();
 
-        _accumulateAllEarnings(user);
+        _accumulateUserAndReferrerEarnings(user);
 
-        unchecked {
-            userData.balance -= amount;
+        uint256 convertedAmount = 0;
+        if (address(tokenConverter) != address(0)) {
+            convertedAmount = tokenConverter.convertAndBurn(amount, user);
         }
+
+        userData.balance -= amount;
         userData.lastUpdateTime = block.timestamp;
 
         if (userData.referrer != address(0)) {
@@ -125,7 +149,7 @@ contract APYExtra is AccessControl {
         }
 
         emit Withdrawn(user, amount);
-        return amount;
+        return convertedAmount;
     }
 
     /**
@@ -146,7 +170,7 @@ contract APYExtra is AccessControl {
 
     /**
      * @notice Calculate unclaimed earnings since last update
-     * @dev Uses exact formula from specification
+     * @dev Uses simplified formula from specification
      */
     function getLastEarnings(address user) public view returns (uint256) {
         UserInfo memory userData = userInfo[user];
@@ -169,16 +193,12 @@ contract APYExtra is AccessControl {
             return 0;
         }
 
-        uint256 timeDelta = calculationTime - userData.lastUpdateTime;
-        uint256 principal = userData.balance;
-
-        return
-            (principal *
-                (PRECISION +
-                    (userData.extraAPY * 1 ether * timeDelta) /
-                        (APY_DENOMINATOR * YEAR))) /
-                1 ether -
-            principal;
+        unchecked {
+            uint256 timeDelta = calculationTime - userData.lastUpdateTime;
+            return
+                (userData.balance * userData.extraAPY * timeDelta) /
+                (APY_DENOMINATOR * YEAR);
+        }
     }
 
     /**
@@ -207,10 +227,35 @@ contract APYExtra is AccessControl {
             return 0;
         }
 
-        uint256 timeDelta = block.timestamp - refData.lastUpdateTime;
-        return
-            (totalRefBalance * referralAPY * timeDelta) /
-            (APY_DENOMINATOR * YEAR);
+        unchecked {
+            uint256 timeDelta = block.timestamp - refData.lastUpdateTime;
+            return
+                (totalRefBalance * referralAPY * timeDelta) /
+                (APY_DENOMINATOR * YEAR);
+        }
+    }
+
+    /**
+     * @dev Accumulate earnings for user and their referrer
+     */
+    function _accumulateUserAndReferrerEarnings(address user) internal {
+        UserInfo storage userData = userInfo[user];
+
+        uint256 pendingUser = getLastEarnings(user);
+        if (pendingUser > 0) {
+            userData.accumulatedEarnings += pendingUser;
+        }
+        userData.lastUpdateTime = block.timestamp;
+
+        address referrer = userData.referrer;
+        if (referrer != address(0)) {
+            ReferralInfo storage refData = referralInfo[referrer];
+            uint256 pendingRef = getReferralsEarnings(referrer);
+            if (pendingRef > 0) {
+                refData.accumulatedEarnings += pendingRef;
+            }
+            refData.lastUpdateTime = block.timestamp;
+        }
     }
 
     /**
@@ -223,19 +268,18 @@ contract APYExtra is AccessControl {
         uint256 amount,
         address referrer
     ) internal {
+        if (amount == 0) return;
+
+        _accumulateUserAndReferrerEarnings(user);
         UserInfo storage userData = userInfo[user];
-
-        _accumulateAllEarnings(user);
-        userData.lastUpdateTime = block.timestamp;
-
-        unchecked {
-            userData.balance += amount;
-        }
 
         if (extraAPY > userData.extraAPY) {
             userData.extraAPY = extraAPY;
             userData.expirationTime = expirationTime;
         }
+
+        userData.balance += amount;
+        userData.lastUpdateTime = block.timestamp;
 
         if (
             referrer != address(0) &&
@@ -259,35 +303,5 @@ contract APYExtra is AccessControl {
         }
 
         emit Deposited(user, amount, extraAPY, userData.referrer);
-    }
-
-    /**
-     * @dev Accumulate all types of earnings for a user
-     */
-    function _accumulateAllEarnings(address user) internal {
-        UserInfo storage userData = userInfo[user];
-
-        uint256 pendingUser = getLastEarnings(user);
-        if (pendingUser > 0) {
-            userData.accumulatedEarnings += pendingUser;
-        }
-
-        ReferralInfo storage refInfo = referralInfo[user];
-        if (refInfo.referrals.length > 0) {
-            uint256 pendingRef = getReferralsEarnings(user);
-            if (pendingRef > 0) {
-                refInfo.accumulatedEarnings += pendingRef;
-                refInfo.lastUpdateTime = block.timestamp;
-            }
-        }
-
-        if (userData.referrer != address(0)) {
-            address referrer = userData.referrer;
-            uint256 pendingReferrer = getReferralsEarnings(referrer);
-            if (pendingReferrer > 0) {
-                referralInfo[referrer].accumulatedEarnings += pendingReferrer;
-                referralInfo[referrer].lastUpdateTime = block.timestamp;
-            }
-        }
     }
 }
